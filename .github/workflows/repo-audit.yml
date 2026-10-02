@@ -1,0 +1,220 @@
+name: repo-audit
+
+# Two checks:
+#   files     — the hardened baseline files still exist in the repo.
+#   settings  — the LIVE repository settings still match
+#               .github/expected-settings.json (the file scripts/bootstrap.sh
+#               applies). Fails with a diff when protections have drifted.
+#
+# To repair drift: re-run ./scripts/bootstrap.sh.
+#
+# NOTE ON PERMISSIONS: several of these settings (secret scanning, Dependabot
+# alerts, rulesets on private repos) are only readable with admin rights, which
+# the default GITHUB_TOKEN does not have. Fields that cannot be read are
+# reported as UNREADABLE warnings, never as drift — a permission gap must not
+# masquerade as a security regression. To audit them for real, add a
+# fine-grained PAT with Administration:read as the REPO_AUDIT_TOKEN secret.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  files:
+    name: baseline files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check hardened baseline files
+        run: |
+          missing=0
+          for f in \
+            README.md \
+            SECURITY.md \
+            CONTRIBUTING.md \
+            CODE_OF_CONDUCT.md \
+            LICENSE \
+            CLAUDE.md \
+            .gitignore \
+            .editorconfig \
+            scripts/bootstrap.sh \
+            .github/CODEOWNERS \
+            .github/pull_request_template.md \
+            .github/dependabot.yml \
+            .github/expected-settings.json \
+            .github/workflows/ci.yml \
+            .github/workflows/codeql.yml \
+            .github/workflows/repo-audit.yml
+          do
+            if [ ! -f "$f" ]; then
+              echo "MISSING: $f"
+              missing=1
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "::error::Baseline hardening files are missing."
+            exit 1
+          fi
+          echo "Baseline hardening files present."
+
+  settings:
+    name: settings drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Compare live settings against expected-settings.json
+        env:
+          # Prefer an admin-scoped PAT when present; fall back to GITHUB_TOKEN.
+          GH_TOKEN: ${{ secrets.REPO_AUDIT_TOKEN || secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          EXPECTED=.github/expected-settings.json
+
+          drift=()
+          unreadable=()
+
+          record_drift()      { drift+=("$1"); echo "DRIFT: $1"; }
+          record_unreadable() { unreadable+=("$1"); echo "UNREADABLE: $1"; }
+
+          compare() { # name expected actual
+            if [ "$2" = "$3" ]; then
+              echo "ok: $1 = $3"
+            else
+              record_drift "$1 — expected \`$2\`, live \`$3\`"
+            fi
+          }
+
+          # ------------------------------------------------ repository ------
+          if ! gh api "repos/$REPO" > /tmp/repo.json 2>/dev/null; then
+            echo "::error::Cannot read repos/$REPO."
+            exit 1
+          fi
+
+          for key in $(jq -r '.repository | keys[]' "$EXPECTED"); do
+            want="$(jq -r --arg k "$key" '.repository[$k]' "$EXPECTED")"
+            got="$(jq -r --arg k "$key" '.[$k] // "null"' /tmp/repo.json)"
+            if [ "$got" = "null" ]; then
+              record_unreadable "repository.$key"
+            else
+              compare "repository.$key" "$want" "$got"
+            fi
+          done
+
+          # -------------------------------------------------- security ------
+          if [ "$(jq -r '.security_and_analysis // "null"' /tmp/repo.json)" = "null" ]; then
+            record_unreadable "security.secret_scanning (needs Administration:read)"
+            record_unreadable "security.secret_scanning_push_protection (needs Administration:read)"
+          else
+            for key in secret_scanning secret_scanning_push_protection; do
+              want="$(jq -r --arg k "$key" '.security[$k]' "$EXPECTED")"
+              got="$(jq -r --arg k "$key" '.security_and_analysis[$k].status // "null"' /tmp/repo.json)"
+              if [ "$got" = "null" ]; then
+                record_unreadable "security.$key"
+              else
+                compare "security.$key" "$want" "$got"
+              fi
+            done
+          fi
+
+          # 204 = enabled, 404 = disabled, anything else = not readable by us.
+          status="$(gh api -i "repos/$REPO/vulnerability-alerts" 2>&1 \
+                    | grep -m1 -oE '(HTTP/[0-9.]+ |\(HTTP )[0-9]{3}' \
+                    | grep -oE '[0-9]{3}$' || true)"
+          case "$status" in
+            204) compare "security.vulnerability_alerts" \
+                   "$(jq -r '.security.vulnerability_alerts' "$EXPECTED")" "true" ;;
+            404) compare "security.vulnerability_alerts" \
+                   "$(jq -r '.security.vulnerability_alerts' "$EXPECTED")" "false" ;;
+            *)   record_unreadable "security.vulnerability_alerts (HTTP ${status:-?}, needs Administration:read)" ;;
+          esac
+
+          if fixes="$(gh api "repos/$REPO/automated-security-fixes" 2>/dev/null)"; then
+            compare "security.automated_security_fixes" \
+              "$(jq -r '.security.automated_security_fixes' "$EXPECTED")" \
+              "$(jq -r '.enabled' <<<"$fixes")"
+          else
+            record_unreadable "security.automated_security_fixes (needs Administration:read)"
+          fi
+
+          # --------------------------------------------------- ruleset ------
+          NAME="$(jq -r '.ruleset.name' "$EXPECTED")"
+
+          if ! gh api "repos/$REPO/rulesets" > /tmp/rulesets.json 2>/dev/null; then
+            record_unreadable "ruleset '$NAME' (cannot list rulesets; needs Administration:read)"
+          else
+            id="$(jq -r --arg n "$NAME" '.[] | select(.name == $n) | .id' /tmp/rulesets.json | head -n1)"
+            if [ -z "$id" ]; then
+              record_drift "ruleset '$NAME' does not exist — branch protection is missing"
+            elif ! gh api "repos/$REPO/rulesets/$id" > /tmp/ruleset.json 2>/dev/null; then
+              record_unreadable "ruleset '$NAME' details (needs Administration:read)"
+            else
+              compare "ruleset.enforcement" \
+                "$(jq -r '.ruleset.enforcement' "$EXPECTED")" \
+                "$(jq -r '.enforcement' /tmp/ruleset.json)"
+
+              compare "ruleset.include_refs" \
+                "$(jq -rc '.ruleset.include_refs | sort' "$EXPECTED")" \
+                "$(jq -rc '.conditions.ref_name.include | sort' /tmp/ruleset.json)"
+
+              for t in $(jq -r '.ruleset.required_rule_types[]' "$EXPECTED"); do
+                if jq -e --arg t "$t" 'any(.rules[]; .type == $t)' /tmp/ruleset.json >/dev/null; then
+                  echo "ok: ruleset rule '$t' present"
+                else
+                  record_drift "ruleset rule '$t' is missing"
+                fi
+              done
+
+              compare "ruleset.required_status_checks" \
+                "$(jq -rc '.ruleset.required_status_checks | sort' "$EXPECTED")" \
+                "$(jq -rc '[.rules[] | select(.type == "required_status_checks")
+                            | .parameters.required_status_checks[].context] | sort' /tmp/ruleset.json)"
+
+              compare "ruleset.strict_required_status_checks_policy" \
+                "$(jq -r '.ruleset.strict_required_status_checks_policy' "$EXPECTED")" \
+                "$(jq -r '[.rules[] | select(.type == "required_status_checks")
+                           | .parameters.strict_required_status_checks_policy] | first // false' /tmp/ruleset.json)"
+
+              compare "ruleset.required_signatures" \
+                "$(jq -r '.ruleset.required_signatures' "$EXPECTED")" \
+                "$(jq -r 'any(.rules[]; .type == "required_signatures")' /tmp/ruleset.json)"
+            fi
+          fi
+
+          # --------------------------------------------------- report -------
+          {
+            echo "## Repository settings audit — \`$REPO\`"
+            echo
+            if [ "${#drift[@]}" -eq 0 ]; then
+              echo "✅ No drift from \`.github/expected-settings.json\`."
+            else
+              echo "### ❌ Drift (${#drift[@]})"
+              echo
+              for d in "${drift[@]}"; do echo "- $d"; done
+              echo
+              echo "Repair with \`./scripts/bootstrap.sh\`."
+            fi
+            if [ "${#unreadable[@]}" -gt 0 ]; then
+              echo
+              echo "### ⚠️ Not readable by this token (${#unreadable[@]})"
+              echo
+              for u in "${unreadable[@]}"; do echo "- $u"; done
+              echo
+              echo "These were **not** checked. Add a fine-grained PAT with"
+              echo "\`Administration: read\` as the \`REPO_AUDIT_TOKEN\` secret to audit them."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${#drift[@]}" -gt 0 ]; then
+            echo "::error::${#drift[@]} setting(s) have drifted from .github/expected-settings.json. Re-run ./scripts/bootstrap.sh."
+            exit 1
+          fi
+          echo "No settings drift detected."

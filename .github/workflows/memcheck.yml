@@ -1,0 +1,175 @@
+name: memcheck
+
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ DISABLED BY DEFAULT — this is a stub.                                     │
+# │                                                                           │
+# │ To enable:                                                                │
+# │   1. Write the project-specific scenario files this workflow expects       │
+# │      (Node: memlab scenarios; Python: a tracemalloc-driven pytest).       │
+# │      They are deliberately NOT in the template — a leak scenario only     │
+# │      means something against a real app.                                  │
+# │   2. Set MEMCHECK_THRESHOLD_MB below to a number that matters for this    │
+# │      app (default 50).                                                    │
+# │   3. Replace `if: false` on the `memcheck` job with either:               │
+# │        if: ${{ vars.ENABLE_MEMCHECK == 'true' }}   # repo variable switch │
+# │      or delete the `if:` line entirely to always run.                     │
+# │                                                                           │
+# │ While `if: false` is in place the job never runs — including on manual    │
+# │ dispatch. That is intentional: an unconfigured memcheck that opens issues │
+# │ is worse than no memcheck.                                                │
+# └───────────────────────────────────────────────────────────────────────────┘
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Monday 06:41 UTC.
+    - cron: "41 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memcheck-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Fail (and open an issue) when retained heap growth exceeds this many MB.
+  MEMCHECK_THRESHOLD_MB: "50"
+
+jobs:
+  memcheck:
+    name: memory leak check
+    # OPT-IN GATE — see the header comment.
+    if: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # required by the "open an issue" step below
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Detect stacks
+        id: detect
+        run: |
+          node=false
+          python=false
+          if [ -f package.json ]; then node=true; fi
+          if [ -f pyproject.toml ] || [ -f requirements.txt ]; then python=true; fi
+          echo "node=$node" >> "$GITHUB_OUTPUT"
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------------- Node
+      - name: Setup Node
+        if: steps.detect.outputs.node == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Node memory check
+        if: steps.detect.outputs.node == 'true'
+        run: |
+          npm ci
+          # TODO(project): run memlab against this app's scenario files.
+          #
+          #   npx memlab run --scenario memlab/scenarios/<flow>.js
+          #
+          # A memlab scenario exports { url, action, back } describing one
+          # round trip through a flow; memlab diffs heap snapshots taken
+          # before, during, and after, and reports objects retained after the
+          # `back` step. Point it at the flows that churn the most state
+          # (auth, list views, editors, websocket reconnects).
+          #
+          # Write the retained-heap delta in MB to $GITHUB_OUTPUT as
+          # `growth_mb` so the threshold step below can act on it.
+          echo "::warning::Node memcheck is a stub — add memlab scenarios and wire up growth_mb."
+
+      # -------------------------------------------------------------- Python
+      - name: Setup Python
+        if: steps.detect.outputs.python == 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Python memory check
+        if: steps.detect.outputs.python == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f pyproject.toml ]; then pip install -e ".[dev]" || pip install -e .; fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest
+          # TODO(project): run the tracemalloc leak test for this app.
+          #
+          #   pytest -q tests/memcheck -p no:randomly
+          #
+          # The usual shape: tracemalloc.start(), take a snapshot, run the
+          # operation under test N times, gc.collect(), take a second
+          # snapshot, then compare_to(first, "lineno") and assert the total
+          # retained delta stays under the threshold. Exercise the long-lived
+          # paths — request handlers, background workers, caches.
+          #
+          # Write the retained delta in MB to $GITHUB_OUTPUT as `growth_mb`.
+          echo "::warning::Python memcheck is a stub — add a tracemalloc test and wire up growth_mb."
+
+      # ----------------------------------------------------------- threshold
+      - name: Evaluate threshold
+        id: evaluate
+        run: |
+          # TODO(project): replace with the real measurement from the steps above.
+          growth_mb=0
+          echo "growth_mb=$growth_mb" >> "$GITHUB_OUTPUT"
+          if [ "$growth_mb" -gt "$MEMCHECK_THRESHOLD_MB" ]; then
+            echo "tripped=true" >> "$GITHUB_OUTPUT"
+            echo "::error::Retained heap grew ${growth_mb}MB, over the ${MEMCHECK_THRESHOLD_MB}MB threshold."
+          else
+            echo "tripped=false" >> "$GITHUB_OUTPUT"
+            echo "Retained heap grew ${growth_mb}MB (threshold ${MEMCHECK_THRESHOLD_MB}MB)."
+          fi
+
+      - name: Open an issue when the threshold trips
+        if: steps.evaluate.outputs.tripped == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const growth = '${{ steps.evaluate.outputs.growth_mb }}';
+            const threshold = process.env.MEMCHECK_THRESHOLD_MB;
+            const title = `memcheck: retained heap grew ${growth}MB (threshold ${threshold}MB)`;
+
+            // Reuse the open issue if one already exists, so a weekly schedule
+            // does not file a duplicate every Monday.
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'memcheck',
+            });
+
+            const body = [
+              `Retained heap grew **${growth}MB**, over the **${threshold}MB** threshold.`,
+              '',
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              `Commit: ${context.sha}`,
+            ].join('\n');
+
+            if (open.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['memcheck'],
+              });
+            }
+
+      - name: Fail the run when the threshold trips
+        if: steps.evaluate.outputs.tripped == 'true'
+        run: exit 1

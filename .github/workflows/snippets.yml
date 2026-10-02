@@ -1,0 +1,166 @@
+name: snippets
+
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ DISABLED BY DEFAULT — this is a stub.                                     │
+# │                                                                           │
+# │ What it does when enabled: reads this repo's README.md plus the snippet   │
+# │ library's SNIPPETS_INDEX.md, asks Claude which snippets apply to this     │
+# │ project, and posts use-as-is / port / rewrite-reference suggestions to    │
+# │ the job summary. It only ever writes to the summary — it does not open    │
+# │ PRs, comment on issues, or change any file.                              │
+# │                                                                           │
+# │ To enable:                                                                │
+# │   1. Create a fine-grained PAT scoped to TipsyCanoe/cs-reusable-snippets  │
+# │      with `Contents: read` ONLY, and add it as the repository secret      │
+# │      SNIPPETS_REPO_TOKEN.                                                 │
+# │   2. Add your Anthropic API key as the repository secret                  │
+# │      ANTHROPIC_API_KEY.                                                   │
+# │   3. Review the TODOs in the "Ask Claude" step — the prompt is the part   │
+# │      worth tuning per project.                                            │
+# │   4. Replace `if: false` on the `suggest` job with either:                │
+# │        if: ${{ vars.ENABLE_SNIPPETS == 'true' }}   # repo variable switch │
+# │      or delete the `if:` line entirely to always run.                     │
+# │                                                                           │
+# │ While `if: false` is in place the job never runs — including on manual    │
+# │ dispatch — so a missing token cannot fail anyone's PR.                    │
+# └───────────────────────────────────────────────────────────────────────────┘
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - README.md
+  push:
+    branches: [main]
+    paths:
+      - README.md
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snippets-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SNIPPETS_REPO: TipsyCanoe/cs-reusable-snippets
+
+jobs:
+  suggest:
+    name: snippet suggestions
+    # OPT-IN GATE — see the header comment.
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Checkout the snippet library
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ env.SNIPPETS_REPO }}
+          token: ${{ secrets.SNIPPETS_REPO_TOKEN }}
+          path: .snippets
+          persist-credentials: false
+
+      - name: Collect inputs
+        id: inputs
+        run: |
+          set -euo pipefail
+
+          [ -f README.md ] || { echo "::error::README.md not found."; exit 1; }
+
+          index=.snippets/SNIPPETS_INDEX.md
+          [ -f "$index" ] || { echo "::error::SNIPPETS_INDEX.md not found in $SNIPPETS_REPO."; exit 1; }
+          cp "$index" /tmp/snippets-index.md
+
+          # Game projects: the Unity manifest is a second catalogue.
+          manifest=.snippets/unity-csharp/MANIFEST.md
+          if [ -f "$manifest" ]; then
+            printf '\n\n---\n\n# unity-csharp/MANIFEST.md\n\n' >> /tmp/snippets-index.md
+            cat "$manifest" >> /tmp/snippets-index.md
+            echo "Included unity-csharp/MANIFEST.md."
+          fi
+
+          cp README.md /tmp/readme.md
+          wc -c /tmp/readme.md /tmp/snippets-index.md
+
+      - name: Ask Claude which snippets apply
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret is not set."
+            exit 1
+          fi
+
+          # TODO(project): tune this prompt. It is the part that decides how
+          # useful the suggestions are — mention the project's language,
+          # framework, and anything the README does not make obvious.
+          read -r -d '' PROMPT_PREFIX <<'EOF' || true
+          You are triaging a reusable-snippet library against a project.
+
+          Below are two documents: the project's README, and the snippet
+          library's index (which may also include a Unity/C# manifest).
+
+          For each snippet that could plausibly help this project, output one
+          bullet in exactly this form:
+
+            - <snippet path> — <verdict> — <one sentence why>
+
+          where <verdict> is one of:
+            use-as-is          same language and fits the need as written
+            port               right approach, wrong language or framework
+            rewrite-reference  related or dated, but the approach is informative
+
+          A snippet written in a different language is a PORT candidate, not a
+          miss — say so rather than skipping it. List at most 10 bullets,
+          most relevant first. If nothing applies, reply exactly:
+          "No snippet match."
+          EOF
+
+          # Build the request body with jq so the documents are JSON-escaped
+          # correctly regardless of their content.
+          jq -n \
+            --arg prefix "$PROMPT_PREFIX" \
+            --rawfile readme /tmp/readme.md \
+            --rawfile index /tmp/snippets-index.md \
+            '{
+               model: "claude-opus-5",
+               max_tokens: 4096,
+               messages: [{
+                 role: "user",
+                 content: ($prefix
+                           + "\n\n# Project README\n\n" + $readme
+                           + "\n\n# Snippet library index\n\n" + $index)
+               }]
+             }' > /tmp/request.json
+
+          # TODO(project): if the two documents together grow past the context
+          # window, switch to sending the index alone and let Claude ask for
+          # specific snippet files, or split the index by section.
+          curl -sS --fail-with-body https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d @/tmp/request.json > /tmp/response.json
+
+          stop_reason="$(jq -r '.stop_reason // "unknown"' /tmp/response.json)"
+          suggestions="$(jq -r '[.content[]? | select(.type == "text") | .text] | join("\n")' /tmp/response.json)"
+
+          {
+            echo "## Snippet suggestions"
+            echo
+            echo "Source: \`$SNIPPETS_REPO\` — triage verdicts are"
+            echo "\`use-as-is\` / \`port\` / \`rewrite-reference\`."
+            echo
+            if [ "$stop_reason" = "refusal" ] || [ -z "$suggestions" ]; then
+              echo "> No suggestions returned (stop_reason: \`$stop_reason\`)."
+            else
+              echo "$suggestions"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Posted snippet suggestions to the job summary."

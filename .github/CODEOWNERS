@@ -1,0 +1,3 @@
+# Default owner for everything in this repository.
+# Required by .github/workflows/repo-audit.yml.
+* @TipsyCanoe

@@ -1,0 +1,47 @@
+{
+  "_comment": [
+    "Single source of truth for repository settings that a template cannot copy.",
+    "scripts/bootstrap.sh APPLIES this file; .github/workflows/repo-audit.yml",
+    "COMPARES live settings against it and fails on drift.",
+    "Edit here first, then re-run scripts/bootstrap.sh."
+  ],
+
+  "repository": {
+    "delete_branch_on_merge": true,
+    "allow_update_branch": true,
+    "has_wiki": false,
+    "has_projects": false
+  },
+
+  "security": {
+    "secret_scanning": "enabled",
+    "secret_scanning_push_protection": "enabled",
+    "vulnerability_alerts": true,
+    "automated_security_fixes": true
+  },
+
+  "ruleset": {
+    "name": "main-protection",
+    "target": "branch",
+    "enforcement": "active",
+    "include_refs": ["~DEFAULT_BRANCH"],
+    "required_rule_types": [
+      "pull_request",
+      "required_status_checks",
+      "non_fast_forward",
+      "deletion"
+    ],
+    "required_status_checks": ["ci"],
+    "required_approving_review_count": 0,
+
+    "_strict_options_comment": [
+      "Both default to false. Flip to true and re-run scripts/bootstrap.sh to enforce.",
+      "strict_required_status_checks_policy: require branches to be up to date",
+      "with main before merging (costs a rebase/merge per stale PR).",
+      "required_signatures: require signed commits (needs GPG/SSH signing",
+      "configured on every machine you commit from, including CI bots)."
+    ],
+    "strict_required_status_checks_policy": false,
+    "required_signatures": false
+  }
+}
