@@ -20,6 +20,16 @@ Guidance for Claude Code when working in this repository.
   `.github/expected-settings.json` and `scripts/bootstrap.sh`, which together
   define the repo's protections.
 
+## Workbook mode (this is a self-guided learning project)
+
+The application is written by the owner, module by module, from `workbook/`.
+Unless they say the exact phrase `EXIT WORKBOOK MODE`, follow the teaching
+contract in `workbook/README.md` (sections 1 to 3): review and explain, do not
+write the implementation for workbook assignments, and give hints only one level
+at a time, only when asked. When they are stuck, point them to `workbook/HINTS.md`
+(stuck protocol, hint request format) and `workbook/RESOURCES.md` (reading). Repo
+plumbing, docs, and workbook upkeep are not assignments and can be done directly.
+
 ## Smoke tests are mandatory
 
 Every project must define its own smoke test, and CI enforces this — the smoke

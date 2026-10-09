@@ -47,7 +47,7 @@ Rules:
 
 ## Hint usage log
 
-Optional, and useful for the retrospective: which modules needed which hint levels.
+Optional, and useful for the retrospective: which modules needed which hint levels. The detailed per-topic record lives in [`HINTS.md`](HINTS.md); this is the summary.
 
 | Module | Topic | Highest hint level used |
 |---|---|---|

@@ -54,7 +54,7 @@ only; read-only consumers get their own least-privilege access.
 ## Repository layout
 
 ```
-workbook/      project workbook: modules, progress tracker, journal
+workbook/      project workbook: modules, progress, journal, hints, resources
 docs/          requirements, domain model, ERD, decisions (from Module 1)
 backend/       FastAPI app, migrations, backend tests
 web/           React + TypeScript client

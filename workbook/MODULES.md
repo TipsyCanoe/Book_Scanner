@@ -1,6 +1,6 @@
 # Modules
 
-Work through these in order. Section 10 of every module is locked: it lists the topics hints exist for, and the hints themselves are given only when you ask, one level at a time.
+Work through these in order. Section 10 of every module is locked: it lists the topics hints exist for, and the hints themselves are given only when you ask, one level at a time. When stuck, start with the protocol in [`HINTS.md`](HINTS.md); for reading material see [`RESOURCES.md`](RESOURCES.md).
 
 ---
 
@@ -34,7 +34,7 @@ Create the project repository and toolchain. No application code yet.
 
 ### 5. Requirements
 - A Git repository with the top-level structure from the workbook README (empty directories may hold a placeholder file).
-- The four workbook files committed under `workbook/`.
+- All the workbook files committed under `workbook/`.
 - Python and Node versions pinned in a way your chosen tools respect.
 - An isolated Python environment that is not committed.
 - A `.gitignore` covering Python, Node, editor files, and environment files.

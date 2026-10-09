@@ -8,6 +8,8 @@ Files in this workbook:
 - `MODULES.md`: all 21 modules, in order.
 - `PROGRESS.md`: the progress tracker and the session-resume format.
 - `JOURNAL.md`: the project journal template.
+- `HINTS.md`: what to do when stuck, how to request a hint, and a per-module record of hints received. Holds no hint content itself.
+- `RESOURCES.md`: documentation and references by module, plus relevant snippets from your snippet library.
 
 ---
 
@@ -49,6 +51,7 @@ Rules:
 - The next level is given only when you explicitly ask for it.
 - Hint 4 is not the finished answer.
 - If you are stuck because a prerequisite has gone fuzzy, the reviewer refreshes the prerequisite and then returns you to the lab.
+- Work the stuck protocol in `HINTS.md` first, and record what you receive there. `RESOURCES.md` lists where to read.
 
 ---
 
@@ -202,7 +205,7 @@ personal-library/
   README.md            project README (you write it; finished in Module 19)
   .gitignore
   .env.example         names of required settings, never values
-  workbook/            these four files
+  workbook/            these six files
   docs/
     requirements.md    Module 1
     domain-model.md    Module 2
